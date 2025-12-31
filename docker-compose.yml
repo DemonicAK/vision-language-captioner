@@ -2,7 +2,7 @@ services:
   training:
     build:
       context: .
-      dockerfile: training/DOCKERFILE
+      dockerfile: training/Dockerfile
     image: image-caption-training:latest
     container_name: image-caption-training
     volumes:
@@ -12,7 +12,7 @@ services:
   inference:
     build:
       context: .
-      dockerfile: inference/DOCKERFILE
+      dockerfile: inference/Dockerfile
     image: image-caption-api:latest
     container_name: image-caption-api
     ports:
