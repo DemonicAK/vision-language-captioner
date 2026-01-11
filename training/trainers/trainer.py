@@ -1,20 +1,23 @@
 """Model trainer abstraction.
 
 This module provides a high-level training interface
-for image captioning models.
+for image captioning models with experiment tracking.
 """
 
 from __future__ import annotations
 
 import logging
 import os
-from dataclasses import dataclass, field
+from dataclasses import asdict, dataclass, field
 from pathlib import Path
-from typing import Any, Callable, Dict, List, Optional
+from typing import Any, Callable, Dict, List, Optional, TYPE_CHECKING
 
 import tensorflow as tf
 
 from training.configs import Config
+
+if TYPE_CHECKING:
+    from training.utils.experiment_tracking import ExperimentTracker
 
 logger = logging.getLogger(__name__)
 
@@ -29,17 +32,31 @@ class TrainingResult:
         final_train_loss: Final training loss.
         final_val_loss: Final validation loss.
         model_path: Path to saved model.
+        run_summary_path: Path to experiment run summary.
     """
     history: Dict[str, List[float]]
     best_epoch: int
     final_train_loss: float
     final_val_loss: Optional[float] = None
     model_path: Optional[str] = None
+    run_summary_path: Optional[str] = None
     
     @property
     def epochs_trained(self) -> int:
         """Number of epochs trained."""
         return len(self.history.get("loss", []))
+    
+    def to_dict(self) -> Dict[str, Any]:
+        """Convert to dictionary for serialization."""
+        return {
+            "history": self.history,
+            "best_epoch": self.best_epoch,
+            "final_train_loss": self.final_train_loss,
+            "final_val_loss": self.final_val_loss,
+            "model_path": self.model_path,
+            "run_summary_path": self.run_summary_path,
+            "epochs_trained": self.epochs_trained,
+        }
 
 
 class CallbackFactory:
@@ -109,15 +126,16 @@ class Trainer:
     """High-level trainer for caption models.
     
     Encapsulates the training loop with callbacks,
-    logging, and model saving.
+    logging, experiment tracking, and model saving.
     
     Attributes:
         model: Keras model to train.
         config: Training configuration.
         artifacts_dir: Directory for saving artifacts.
+        tracker: Experiment tracker for logging.
     
     Example:
-        >>> trainer = Trainer(model, config)
+        >>> trainer = Trainer(model, config, run_name="experiment_001")
         >>> result = trainer.train(train_ds, val_ds, steps_per_epoch=100)
         >>> trainer.save_model("final_model.keras")
     """
@@ -127,6 +145,8 @@ class Trainer:
         model: tf.keras.Model,
         config: Config,
         artifacts_dir: Optional[str] = None,
+        run_name: Optional[str] = None,
+        tracker: Optional["ExperimentTracker"] = None,
     ) -> None:
         """Initialize trainer.
         
@@ -134,6 +154,8 @@ class Trainer:
             model: Keras model to train.
             config: Training configuration.
             artifacts_dir: Directory for saving artifacts.
+            run_name: Name for the training run (for experiment tracking).
+            tracker: Optional pre-configured experiment tracker.
         """
         self._model = model
         self._config = config
@@ -143,6 +165,20 @@ class Trainer:
         self._artifacts_dir.mkdir(parents=True, exist_ok=True)
         
         self._history: Optional[tf.keras.callbacks.History] = None
+        
+        # Initialize experiment tracker
+        if tracker is not None:
+            self._tracker = tracker
+        else:
+            from training.utils.experiment_tracking import ExperimentTracker
+            self._tracker = ExperimentTracker(
+                output_dir=self._artifacts_dir,
+                run_name=run_name,
+                seed=config.data.random_seed,
+            )
+        
+        # Log config
+        self._log_config()
     
     @property
     def model(self) -> tf.keras.Model:
@@ -155,6 +191,20 @@ class Trainer:
         if self._history is None:
             return None
         return self._history.history
+    
+    @property
+    def tracker(self) -> "ExperimentTracker":
+        """Get the experiment tracker."""
+        return self._tracker
+    
+    def _log_config(self) -> None:
+        """Log configuration to experiment tracker."""
+        config_dict = {
+            "data": asdict(self._config.data),
+            "model": asdict(self._config.model),
+            "training": asdict(self._config.training),
+        }
+        self._tracker.log_config(config_dict)
     
     def _create_callbacks(
         self,
@@ -184,9 +234,14 @@ class Trainer:
             ),
         ]
         
-        # TensorBoard logging
-        log_dir = str(self._artifacts_dir / "logs")
+        # TensorBoard logging (use tracker's logs directory)
+        log_dir = str(self._tracker.logs_dir)
         callbacks.append(CallbackFactory.tensorboard(log_dir))
+        
+        # Add experiment tracking callback
+        from training.utils.experiment_tracking import TFMetricsLoggingCallback
+        if TFMetricsLoggingCallback is not None:
+            callbacks.append(TFMetricsLoggingCallback(self._tracker))
         
         if extra_callbacks:
             callbacks.extend(extra_callbacks)
@@ -252,6 +307,37 @@ class Trainer:
         )
         
         return result
+    
+    def log_bleu_scores(
+        self,
+        bleu1: float,
+        bleu2: float,
+        bleu3: float,
+        bleu4: float,
+        split: str = "test",
+    ) -> None:
+        """Log BLEU evaluation scores.
+        
+        Args:
+            bleu1: BLEU-1 score.
+            bleu2: BLEU-2 score.
+            bleu3: BLEU-3 score.
+            bleu4: BLEU-4 score.
+            split: Data split (train/val/test).
+        """
+        self._tracker.log_bleu_scores(bleu1, bleu2, bleu3, bleu4, split)
+    
+    def finalize(self, error: Optional[str] = None) -> str:
+        """Finalize training run and save summary.
+        
+        Args:
+            error: Error message if run failed.
+            
+        Returns:
+            Path to run summary file.
+        """
+        summary_path = self._tracker.finalize(error)
+        return str(summary_path)
     
     def save_model(
         self,

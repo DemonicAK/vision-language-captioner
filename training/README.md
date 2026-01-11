@@ -53,10 +53,13 @@ training/
     ├── __init__.py
     ├── io.py                # File I/O (save_json, load_json, ensure_dir)
     ├── logging.py           # Logging setup
-    └── mixed_precision.py   # GPU and mixed precision configuration
+    ├── mixed_precision.py   # GPU and mixed precision configuration
+    ├── experiment_tracking.py # Experiment tracking and reproducibility
+    └── model_versioning.py  # Model versioning and artifact management
 ```
 
 ## Quick Start
+
 
 ### 1. Configure Paths
 
@@ -83,6 +86,90 @@ Models and tokenizer files are saved to `shared/artifacts/`:
 - `wordtoix.json` - Word to index mapping
 - `ixtoword.json` - Index to word mapping
 - `features.npy` - Extracted image features
+- `run_summary.json` - Experiment run summary
+- `metrics.csv` - Epoch-wise metrics
+- `config_snapshot.json` - Configuration snapshot
+- `logs/` - TensorBoard logs
+
+## Experiment Tracking
+
+The training pipeline automatically tracks experiments with:
+
+### Run Summary (`run_summary.json`)
+```json
+{
+  "metadata": {
+    "run_id": "20240115_143022_abc12345",
+    "run_name": "experiment_001",
+    "git_info": {"commit": "abc123...", "branch": "main"},
+    "environment": {"tensorflow_version": "2.15.0"}
+  },
+  "config": {...},
+  "final_metrics": {"epoch": 20, "train_loss": 2.1, "val_loss": 2.3},
+  "bleu_scores": {"test_bleu4": 0.25}
+}
+```
+
+### Epoch Metrics (`metrics.csv`)
+```csv
+epoch,train_loss,val_loss,learning_rate,epoch_time_seconds
+1,4.5,4.2,0.0001,120.5
+2,3.8,3.6,0.0001,118.2
+...
+```
+
+### Usage
+```python
+from training.utils import ExperimentTracker, set_global_seed
+
+# Set seed for reproducibility
+set_global_seed(42)
+
+# Create tracker
+tracker = ExperimentTracker(
+    output_dir="experiments/run_001",
+    run_name="my_experiment",
+    seed=42,
+)
+
+# Log config
+tracker.log_config(config_dict)
+
+# Log metrics during training
+tracker.log_metrics(epoch=1, train_loss=2.5, val_loss=2.8)
+
+# Log BLEU scores
+tracker.log_bleu_scores(bleu1=0.65, bleu2=0.45, bleu3=0.35, bleu4=0.25)
+
+# Finalize and save summary
+tracker.finalize()
+```
+
+## Model Versioning
+
+Register and manage model versions:
+
+```python
+from training.utils.model_versioning import ModelVersionManager
+
+manager = ModelVersionManager("models/")
+
+# Register a new version
+manager.register_version(
+    version="1.0.0",
+    model_path="artifacts/model.keras",
+    vocab_dir="artifacts/",
+    run_id="run_001",
+    metrics={"bleu4": 0.25, "val_loss": 2.3},
+    description="Initial release",
+)
+
+# Get latest version
+latest = manager.get_latest_version()
+
+# Compare versions
+comparison = manager.compare_versions("1.0.0", "1.1.0")
+```
 
 ## Key Design Patterns
 
