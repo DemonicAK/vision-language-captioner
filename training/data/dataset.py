@@ -11,6 +11,7 @@ from dataclasses import dataclass
 from typing import Callable, Dict, Iterator, List, Optional, Tuple
 
 import numpy as np
+from requests import options
 import tensorflow as tf
 
 from training.data.tokenizer import Tokenizer
@@ -187,14 +188,17 @@ class DatasetBuilder:
         
         dataset = (
             dataset
-            .map(map_fn, num_parallel_calls=tf.data.AUTOTUNE)
+            .map(map_fn, num_parallel_calls=4)
             .batch(self._batch_size, drop_remainder=True)
         )
         
         if repeat:
             dataset = dataset.repeat()
         
-        dataset = dataset.prefetch(tf.data.AUTOTUNE)
+        dataset = dataset.prefetch(1)
+        options = tf.data.Options()
+        options.experimental_deterministic = False
+        dataset = dataset.with_options(options)
         
         return dataset
     
