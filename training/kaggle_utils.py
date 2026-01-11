@@ -92,8 +92,8 @@ def setup_kaggle_training(
 
 def create_kaggle_config(
     output_path: str | Path = "training/config.kaggle.yaml",
-    flickr_dataset: str = "adityajn105/flickr8k",
-    glove_dataset: str = "incorpes/glove6b200d",
+    flickr_dataset: str = "flickr8k",
+    glove_dataset: str = "glove6b200d",
 ) -> None:
     """Create Kaggle-specific configuration file.
     

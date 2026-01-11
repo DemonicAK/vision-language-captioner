@@ -4,9 +4,10 @@
 # This config is pre-set for Kaggle datasets. Modify dataset names if needed.
 
 # Data Configuration (Kaggle paths)
-images_path: "/kaggle/input/adityajn105/flickr8k/Images/"
-captions_file: "/kaggle/input/adityajn105/flickr8k/captions.txt"
-glove_path: "/kaggle/input/incorpes/glove6b200d/glove.6B.200d.txt"
+# Note: Kaggle mounts datasets at /kaggle/input/<dataset-slug>/ (without username)
+images_path: "/kaggle/input/flickr8k/Images/"
+captions_file: "/kaggle/input/flickr8k/captions.txt"
+glove_path: "/kaggle/input/glove6b200d/glove.6B.200d.txt"
 
 # Data split ratios
 train_ratio: 0.6

@@ -123,7 +123,13 @@ class CaptionLoader:
         with open(captions_file, "r", encoding="utf-8") as f:
             content = f.read()
         
-        for line in content.split("\n"):
+        lines = content.split("\n")
+        
+        # Skip header row if present (e.g., "image,caption")
+        if lines and lines[0].strip().lower() in ("image,caption", "image, caption", "filename,caption"):
+            lines = lines[1:]
+        
+        for line in lines:
             if len(line) < 3:
                 continue
             
@@ -133,6 +139,11 @@ class CaptionLoader:
             
             # Extract image ID (without extension)
             image_id = tokens[0].split(".")[0]
+            
+            # Skip if image_id looks like a header
+            if image_id.lower() in ("image", "filename", "file"):
+                continue
+            
             caption = tokens[1].strip()
             
             # Preprocess the caption
