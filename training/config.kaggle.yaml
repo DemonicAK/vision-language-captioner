@@ -5,8 +5,8 @@
 
 # Data Configuration (Kaggle paths)
 # Note: Kaggle mounts datasets at /kaggle/input/<dataset-slug>/ (without username)
-images_path: "/kaggle/input/flickr8k/Images/"
-captions_file: "/kaggle/input/flickr8k/captions.txt"
+images_path: "/kaggle/input/flickr30k/Images/"
+captions_file: "/kaggle/input/flickr30k/captions.txt"
 glove_path: "/kaggle/input/glove6b200d/glove.6B.200d.txt"
 
 # Data split ratios
