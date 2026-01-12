@@ -406,13 +406,20 @@ def build_caption_model(
         name="caption_model",
     )
     
-    # Compile
+    # Compile with JIT compilation for faster training
+    optimizer = tf.keras.optimizers.Adam(
+        learning_rate=learning_rate,
+        # Use legacy optimizer for better mixed precision support
+    )
+    
+    # Enable XLA JIT compilation for faster execution
     model.compile(
-        optimizer=tf.keras.optimizers.Adam(learning_rate=learning_rate),
+        optimizer=optimizer,
         loss=tf.keras.losses.SparseCategoricalCrossentropy(),
-        # metrics=["accuracy"],
+        jit_compile=True,  # Enable XLA JIT compilation
     )
     
     logger.info(f"Built caption model with {model.count_params():,} parameters")
+    logger.info("XLA JIT compilation enabled for faster training")
     
     return model

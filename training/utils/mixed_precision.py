@@ -7,6 +7,7 @@ mixed precision training and GPU configuration.
 from __future__ import annotations
 
 import logging
+import os
 from typing import List, Optional
 
 import tensorflow as tf
@@ -31,7 +32,7 @@ def setup_gpu(
     memory_growth: bool = True,
     visible_devices: Optional[List[int]] = None,
 ) -> List[tf.config.PhysicalDevice]:
-    """Configure GPU settings.
+    """Configure GPU settings with performance optimizations.
     
     Args:
         memory_growth: Whether to enable memory growth.
@@ -40,6 +41,15 @@ def setup_gpu(
     Returns:
         List of configured GPU devices.
     """
+    # Performance environment variables (set before TF initialization ideally)
+    os.environ.setdefault("TF_GPU_THREAD_MODE", "gpu_private")
+    os.environ.setdefault("TF_GPU_THREAD_COUNT", "2")
+    os.environ.setdefault("TF_ENABLE_CUDNN_TENSOR_OP_MATH_FP32", "1")
+    os.environ.setdefault("TF_ENABLE_CUBLAS_TENSOR_OP_MATH_FP32", "1")
+    
+    # Enable XLA globally
+    tf.config.optimizer.set_jit(True)
+    
     gpus = tf.config.list_physical_devices("GPU")
     
     if not gpus:
@@ -62,6 +72,10 @@ def setup_gpu(
                 logger.info(f"Enabled memory growth for {gpu.name}")
             except RuntimeError as e:
                 logger.warning(f"Could not set memory growth: {e}")
+    
+    logger.info("XLA JIT compilation enabled globally")
+    
+    return gpus
     
     return gpus
 

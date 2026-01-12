@@ -6,6 +6,7 @@ This script orchestrates the full training pipeline:
 3. Extract image features
 4. Build and train model
 5. Save artifacts
+6. Evaluate with BLEU scores
 
 Usage:
     python -m training.train --config training/config.yaml
@@ -17,8 +18,14 @@ Configuration:
 from __future__ import annotations
 
 import argparse
+import csv
+import json
+import random
 import sys
 from pathlib import Path
+from typing import Dict, List, Tuple, Any
+
+import numpy as np
 
 # Add parent directory to path for imports
 sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
@@ -29,6 +36,8 @@ from training.data.tokenizer import GloVeEmbeddings
 from training.features import get_feature_extractor
 from training.models import build_caption_model
 from training.trainers import Trainer
+from training.evaluation.inference import GreedyDecoder
+from training.evaluation.metrics import CaptionEvaluator, BLEUScore
 from training.utils import (
     setup_logging,
     get_logger,
@@ -65,6 +74,9 @@ class TrainingPipeline:
         self._tokenizer: Tokenizer | None = None
         self._embedding_matrix = None
         self._max_length: int = 0
+        self._splits = None
+        self._features = None
+        self._trainer: Trainer | None = None
     
     def _setup(self) -> None:
         """Setup training environment."""
@@ -229,13 +241,13 @@ class TrainingPipeline:
         """Train the model."""
         logger.info("Starting training")
         
-        trainer = Trainer(
+        self._trainer = Trainer(
             model=model,
             config=self._config,
             artifacts_dir=str(self._artifacts_dir),
         )
         
-        result = trainer.train(
+        result = self._trainer.train(
             train_dataset=train_ds,
             val_dataset=val_ds,
             steps_per_epoch=steps_per_epoch,
@@ -243,56 +255,187 @@ class TrainingPipeline:
         )
         
         # Save final model
-        model_path = trainer.save_model()
+        model_path = self._trainer.save_model()
         result.model_path = model_path
         
         return result
+    
+    def _evaluate_bleu(
+        self,
+        model,
+        features: Dict[str, np.ndarray],
+        descriptions: Dict[str, List[str]],
+        sample_size: int = 100,
+    ) -> Tuple[BLEUScore, List[Dict[str, Any]]]:
+        """Evaluate model with BLEU scores on random samples.
+        
+        Args:
+            model: Trained model.
+            features: Image features dictionary.
+            descriptions: Ground truth captions dictionary.
+            sample_size: Number of images to evaluate.
+            
+        Returns:
+            Tuple of (aggregate BLEUScore, per-image results list).
+        """
+        logger.info(f"Evaluating BLEU scores on {sample_size} random images")
+        
+        # Create decoder
+        decoder = GreedyDecoder(
+            tokenizer=self._tokenizer,
+            max_length=self._max_length,
+        )
+        
+        # Sample random images
+        available_keys = [k for k in descriptions.keys() if k in features]
+        sample_keys = random.sample(
+            available_keys, 
+            min(sample_size, len(available_keys))
+        )
+        
+        # Generate predictions and collect references
+        predictions = []
+        references = []
+        per_image_results = []
+        
+        evaluator = CaptionEvaluator(smoothing=True)
+        
+        for key in sample_keys:
+            # Get feature
+            feature = features[key]
+            if len(feature.shape) == 1:
+                feature = np.expand_dims(feature, 0)
+            
+            # Generate caption
+            pred = decoder.decode(model, feature)
+            refs = descriptions[key]
+            
+            predictions.append(pred)
+            references.append(refs)
+            
+            # Calculate per-image BLEU scores
+            img_scores = evaluator.evaluate([pred], [refs])
+            per_image_results.append({
+                "image_id": key,
+                "bleu-1": img_scores.bleu1,
+                "bleu-2": img_scores.bleu2,
+                "bleu-3": img_scores.bleu3,
+                "bleu-4": img_scores.bleu4,
+            })
+        
+        # Compute corpus-level BLEU
+        corpus_scores = evaluator.evaluate(predictions, references)
+        
+        logger.info(f"Corpus BLEU scores: {corpus_scores}")
+        
+        return corpus_scores, per_image_results
+    
+    def _save_bleu_results(
+        self,
+        corpus_scores: BLEUScore,
+        per_image_results: List[Dict[str, Any]],
+    ) -> Tuple[Path, Path]:
+        """Save BLEU evaluation results to CSV.
+        
+        Args:
+            corpus_scores: Aggregate BLEU scores.
+            per_image_results: Per-image BLEU scores.
+            
+        Returns:
+            Tuple of (bleu_csv_path, logs_dir).
+        """
+        logs_dir = self._artifacts_dir / "logs"
+        logs_dir.mkdir(parents=True, exist_ok=True)
+        
+        # Save per-image BLEU scores to CSV
+        bleu_csv_path = logs_dir / "bleu_scores.csv"
+        with open(bleu_csv_path, "w", newline="") as f:
+            writer = csv.DictWriter(
+                f, 
+                fieldnames=["image_id", "bleu-1", "bleu-2", "bleu-3", "bleu-4"]
+            )
+            writer.writeheader()
+            writer.writerows(per_image_results)
+        
+        logger.info(f"Saved per-image BLEU scores to {bleu_csv_path}")
+        
+        return bleu_csv_path, logs_dir
     
     def run(self) -> None:
         """Execute the full training pipeline."""
         logger.info("=" * 60)
         logger.info("Starting Image Captioning Training Pipeline")
         logger.info("=" * 60)
-        
+
         # Setup
         self._setup()
-        
+
         # Load data
-        splits = self._load_data()
-        
+        self._splits = self._load_data()
+
         # Load embeddings
         self._load_embeddings()
-        
+
         # Get all image keys
         all_keys = sorted(
-            set(splits.train_keys) | 
-            set(splits.val_keys) | 
-            set(splits.test_keys)
+            set(self._splits.train_keys) | 
+            set(self._splits.val_keys) | 
+            set(self._splits.test_keys)
         )
-        
+
         # Extract features
-        features = self._extract_features(all_keys)
-        
+        self._features = self._extract_features(all_keys)
+
         # Build datasets
         train_ds, val_ds, steps_per_epoch, val_steps = self._build_datasets(
-            splits, features
+            self._splits, self._features
         )
-        
+
         # Build model
         model = self._build_model()
-        
+
         # Train
         result = self._train(
             model, train_ds, val_ds, steps_per_epoch, val_steps
         )
+
+        # Evaluate BLEU scores on test set (100 random images)
+        test_descriptions = self._splits.test
+        corpus_scores, per_image_results = self._evaluate_bleu(
+            model=model,
+            features=self._features,
+            descriptions=test_descriptions,
+            sample_size=100,
+        )
         
+        # Save BLEU results to CSV
+        self._save_bleu_results(corpus_scores, per_image_results)
+        
+        # Log BLEU scores to experiment tracker and finalize
+        self._trainer.log_bleu_scores(
+            bleu1=corpus_scores.bleu1,
+            bleu2=corpus_scores.bleu2,
+            bleu3=corpus_scores.bleu3,
+            bleu4=corpus_scores.bleu4,
+            split="test",
+        )
+        
+        # Finalize experiment (creates run_summary.json)
+        run_summary_path = self._trainer.finalize()
+        result.run_summary_path = run_summary_path
+
         logger.info("=" * 60)
         logger.info("Training Complete!")
         logger.info(f"Best epoch: {result.best_epoch}")
         logger.info(f"Final train loss: {result.final_train_loss:.4f}")
         if result.final_val_loss:
             logger.info(f"Final val loss: {result.final_val_loss:.4f}")
+        logger.info(f"BLEU-1: {corpus_scores.bleu1:.4f}")
+        logger.info(f"BLEU-2: {corpus_scores.bleu2:.4f}")
+        logger.info(f"BLEU-3: {corpus_scores.bleu3:.4f}")
+        logger.info(f"BLEU-4: {corpus_scores.bleu4:.4f}")
         logger.info(f"Model saved to: {result.model_path}")
+        logger.info(f"Run summary saved to: {run_summary_path}")
         logger.info("=" * 60)
 
 
