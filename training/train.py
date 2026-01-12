@@ -19,6 +19,7 @@ from __future__ import annotations
 
 import argparse
 import csv
+import gc
 import json
 import random
 import sys
@@ -26,6 +27,7 @@ from pathlib import Path
 from typing import Dict, List, Tuple, Any
 
 import numpy as np
+import tensorflow as tf
 
 # Add parent directory to path for imports
 sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
@@ -390,6 +392,12 @@ class TrainingPipeline:
         train_ds, val_ds, steps_per_epoch, val_steps = self._build_datasets(
             self._splits, self._features
         )
+
+        # Clear memory before building model
+        # This frees up GPU memory from feature extraction
+        gc.collect()
+        tf.keras.backend.clear_session()
+        logger.info("Cleared session and collected garbage before model building")
 
         # Build model
         model = self._build_model()
