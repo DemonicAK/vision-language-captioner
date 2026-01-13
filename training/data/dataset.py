@@ -2,16 +2,18 @@
 
 This module provides dataset construction utilities for creating
 efficient tf.data pipelines for caption model training.
+
+Uses pure TensorFlow operations (from_tensor_slices) for optimal
+GPU performance without Python callbacks.
 """
 
 from __future__ import annotations
 
 import logging
 from dataclasses import dataclass
-from typing import Callable, Dict, Iterator, List, Optional, Tuple
+from typing import Dict, List, Tuple
 
 import numpy as np
-from requests import options
 import tensorflow as tf
 
 from training.data.tokenizer import Tokenizer
@@ -20,24 +22,25 @@ logger = logging.getLogger(__name__)
 
 
 @dataclass
-class TrainingSample:
-    """Single training sample for caption model.
+class PreparedData:
+    """Pre-computed tensors for efficient tf.data pipeline.
     
     Attributes:
-        image_key: Image identifier.
-        input_sequence: Partial caption sequence (input).
-        target_word: Next word to predict (target).
+        image_features: Array of shape (num_samples, feature_dim).
+        input_sequences: Padded sequences of shape (num_samples, max_length).
+        targets: Target word indices of shape (num_samples,).
     """
-    image_key: str
-    input_sequence: List[int]
-    target_word: int
+    image_features: np.ndarray
+    input_sequences: np.ndarray
+    targets: np.ndarray
 
 
 class DatasetBuilder:
     """Builder for TensorFlow training datasets.
     
     Creates efficient tf.data pipelines for training caption models
-    with image features and text sequences.
+    with image features and text sequences. Uses from_tensor_slices
+    for pure TensorFlow operations without Python callbacks.
     
     Attributes:
         max_length: Maximum sequence length.
@@ -46,8 +49,8 @@ class DatasetBuilder:
     
     Example:
         >>> builder = DatasetBuilder(max_length=38, feature_dim=1536, batch_size=64)
-        >>> samples = builder.build_samples(descriptions, features, tokenizer)
-        >>> dataset = builder.create_dataset(samples, features)
+        >>> prepared = builder.prepare_data(descriptions, features, tokenizer)
+        >>> dataset = builder.create_dataset(prepared)
     """
     
     def __init__(
@@ -85,16 +88,16 @@ class DatasetBuilder:
         """Batch size."""
         return self._batch_size
     
-    def build_samples(
+    def prepare_data(
         self,
         descriptions: Dict[str, List[str]],
         features: Dict[str, np.ndarray],
         tokenizer: Tokenizer,
-    ) -> List[TrainingSample]:
-        """Build training samples from descriptions and features.
+    ) -> PreparedData:
+        """Prepare all training data as numpy arrays.
         
-        Creates (image, partial_sequence, next_word) tuples for
-        teacher forcing training.
+        Pre-computes all samples with padding for efficient
+        tf.data.from_tensor_slices pipeline.
         
         Args:
             descriptions: Dictionary of image_id -> captions.
@@ -102,113 +105,107 @@ class DatasetBuilder:
             tokenizer: Fitted tokenizer instance.
             
         Returns:
-            List of TrainingSample objects.
+            PreparedData with pre-computed arrays.
         """
-        samples: List[TrainingSample] = []
+        image_features_list: List[np.ndarray] = []
+        input_sequences_list: List[np.ndarray] = []
+        targets_list: List[int] = []
         
         for image_key, captions in descriptions.items():
             if image_key not in features:
                 continue
+            
+            img_feat = features[image_key]
             
             for caption in captions:
                 sequence = tokenizer.encode(caption)
                 
                 # Create input-output pairs for each position
                 for i in range(1, len(sequence)):
-                    samples.append(TrainingSample(
-                        image_key=image_key,
-                        input_sequence=sequence[:i],
-                        target_word=sequence[i],
-                    ))
+                    # Pad input sequence to max_length
+                    input_seq = sequence[:i]
+                    padded = np.zeros(self._max_length, dtype=np.int32)
+                    seq_len = min(len(input_seq), self._max_length)
+                    padded[:seq_len] = input_seq[:seq_len]
+                    
+                    image_features_list.append(img_feat)
+                    input_sequences_list.append(padded)
+                    targets_list.append(sequence[i])
         
-        logger.info(f"Built {len(samples)} training samples")
-        return samples
+        prepared = PreparedData(
+            image_features=np.array(image_features_list, dtype=np.float32),
+            input_sequences=np.array(input_sequences_list, dtype=np.int32),
+            targets=np.array(targets_list, dtype=np.int32),
+        )
+        
+        logger.info(f"Prepared {len(targets_list)} training samples as tensors")
+        return prepared
     
     def create_dataset(
         self,
-        samples: List[TrainingSample],
-        features: Dict[str, np.ndarray],
+        prepared: PreparedData,
         shuffle: bool = True,
         repeat: bool = True,
     ) -> tf.data.Dataset:
-        """Create TensorFlow dataset from samples.
+        """Create TensorFlow dataset from prepared data.
+        
+        Uses from_tensor_slices for pure TensorFlow operations,
+        enabling better GPU utilization without Python callbacks.
         
         Args:
-            samples: List of TrainingSample objects.
-            features: Dictionary of image_id -> feature vectors.
+            prepared: PreparedData with pre-computed arrays.
             shuffle: Whether to shuffle the dataset.
             repeat: Whether to repeat the dataset infinitely.
             
         Returns:
             tf.data.Dataset yielding ((image_features, text_input), target).
         """
-        def generator() -> Iterator[Tuple[str, np.ndarray, int]]:
-            for sample in samples:
-                yield (
-                    sample.image_key,
-                    np.array(sample.input_sequence, dtype=np.int32),
-                    np.int32(sample.target_word),
-                )
+        dataset = tf.data.Dataset.from_tensor_slices((
+            prepared.image_features,
+            prepared.input_sequences,
+            prepared.targets,
+        ))
         
-        output_signature = (
-            tf.TensorSpec(shape=(), dtype=tf.string),
-            tf.TensorSpec(shape=(None,), dtype=tf.int32),
-            tf.TensorSpec(shape=(), dtype=tf.int32),
-        )
+        if shuffle:
+            dataset = dataset.shuffle(
+                buffer_size=self._shuffle_buffer,
+                reshuffle_each_iteration=True,
+            )
         
-        dataset = tf.data.Dataset.from_generator(
-            generator,
-            output_signature=output_signature,
-        )
-        
-        def map_fn(
-            key: tf.Tensor,
+        def format_sample(
+            image_features: tf.Tensor,
             input_seq: tf.Tensor,
             target: tf.Tensor,
         ) -> Tuple[Tuple[tf.Tensor, tf.Tensor], tf.Tensor]:
-            # Look up image features
-            image_features = tf.numpy_function(
-                lambda k: features[k.decode("utf-8")].astype(np.float32),
-                [key],
-                tf.float32,
-            )
-            image_features.set_shape([self._feature_dim])
-            
-            # Pad input sequence
-            padded_seq = tf.pad(
-                input_seq,
-                [[0, self._max_length - tf.shape(input_seq)[0]]],
-            )
-            padded_seq = padded_seq[:self._max_length]
-            
-            return (image_features, padded_seq), target
-        
-        if shuffle:
-            dataset = dataset.shuffle(self._shuffle_buffer)
+            """Format sample as ((image, sequence), target)."""
+            return (image_features, input_seq), target
         
         dataset = (
             dataset
-            .map(map_fn, num_parallel_calls=4)
+            .map(format_sample, num_parallel_calls=tf.data.AUTOTUNE)
             .batch(self._batch_size, drop_remainder=True)
+            .prefetch(tf.data.AUTOTUNE)
         )
         
         if repeat:
             dataset = dataset.repeat()
         
-        dataset = dataset.prefetch(1)
+        # Performance optimizations
         options = tf.data.Options()
         options.experimental_deterministic = False
+        options.threading.private_threadpool_size = 8
         dataset = dataset.with_options(options)
         
         return dataset
     
-    def compute_steps_per_epoch(self, num_samples: int) -> int:
+    def compute_steps_per_epoch(self, prepared: PreparedData) -> int:
         """Compute number of steps per epoch.
         
         Args:
-            num_samples: Total number of training samples.
+            prepared: PreparedData with pre-computed arrays.
             
         Returns:
             Number of batches per epoch.
         """
+        num_samples = len(prepared.targets)
         return max(1, num_samples // self._batch_size)
