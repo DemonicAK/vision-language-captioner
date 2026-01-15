@@ -366,11 +366,12 @@ class TrainingPipeline:
         logger.info("=" * 60)
         logger.info("Starting Image Captioning Training Pipeline")
         logger.info("=" * 60)
-        cfg = self._config
-        sample_size = cfg.data.bleu_sample_size
 
         # Setup
         self._setup()
+        
+        cfg = self._config
+        sample_size = cfg.data.bleu_sample_size
 
         # Load data
         self._splits = self._load_data()
