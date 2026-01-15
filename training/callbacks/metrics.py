@@ -6,6 +6,7 @@ monitoring training progress and computing metrics.
 
 from __future__ import annotations
 
+import gc
 import logging
 import time
 from typing import Any, Dict, List, Optional
@@ -57,6 +58,7 @@ class MetricsCallback(tf.keras.callbacks.Callback):
         logs: Optional[Dict[str, Any]] = None,
     ) -> None:
         """Called at the beginning of each epoch."""
+        gc.collect()
         self._epoch_start = time.time()
     
     def on_epoch_end(
