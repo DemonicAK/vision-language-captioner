@@ -78,6 +78,8 @@ class TrainingPipeline:
         self._max_length: int = 0
         self._splits = None
         self._features = None
+        self._features_path: Path | None = None
+        self._feature_keys: list | None = None
         self._trainer: Trainer | None = None
     
     def _setup(self) -> None:
@@ -169,50 +171,71 @@ class TrainingPipeline:
         )
         
         # Save features
-        features_path = self._artifacts_dir / "features.npy"
-        extractor.save_features(features, features_path)
-        logger.info(f"Saved features to {features_path}")
+        self._features_path = self._artifacts_dir / "features.npy"
+        extractor.save_features(features, self._features_path)
+        logger.info(f"Saved features to {self._features_path}")
+        
+        # Store feature keys for streaming dataset
+        self._feature_keys = list(features.keys())
         
         return features
     
     def _build_datasets(self, splits, features):
-        """Build training datasets."""
-        logger.info("Building datasets")
+        """Build training datasets using memory-efficient streaming mode.
+        
+        Uses streaming dataset to avoid OOM on memory-constrained systems
+        like Kaggle (13-16GB RAM). Features are memory-mapped from disk
+        and samples are generated lazily per batch.
+        """
+        logger.info("Building datasets (streaming mode for memory efficiency)")
         cfg = self._config
         
         builder = DatasetBuilder(
             max_length=self._max_length,
             feature_dim=cfg.model.feature_dim,
             batch_size=cfg.training.batch_size,
+            streaming=True,
+            use_float16=True,  # 50% memory reduction
         )
         
-        # Prepare data as tensors
-        train_prepared = builder.prepare_data(
-            splits.train,
-            features,
-            self._tokenizer,
+        # Prepare streaming specs (only builds index, doesn't load all data)
+        train_spec = builder.prepare_streaming_data(
+            descriptions=splits.train,
+            features_path=self._features_path,
+            tokenizer=self._tokenizer,
+            feature_keys=self._feature_keys,
         )
-        val_prepared = builder.prepare_data(
-            splits.val,
-            features,
-            self._tokenizer,
+        val_spec = builder.prepare_streaming_data(
+            descriptions=splits.val,
+            features_path=self._features_path,
+            tokenizer=self._tokenizer,
+            feature_keys=self._feature_keys,
         )
         
-        # Create datasets
-        train_ds = builder.create_dataset(
-            train_prepared,
+        # Create streaming datasets
+        train_ds = builder.create_streaming_dataset(
+            train_spec,
             shuffle=True,
             repeat=True,
         )
-        val_ds = builder.create_dataset(
-            val_prepared,
+        val_ds = builder.create_streaming_dataset(
+            val_spec,
             shuffle=False,
             repeat=True,
         )
         
         # Compute steps
-        steps_per_epoch = builder.compute_steps_per_epoch(train_prepared)
-        val_steps = builder.compute_steps_per_epoch(val_prepared)
+        steps_per_epoch = builder.compute_streaming_steps(train_spec)
+        val_steps = builder.compute_streaming_steps(val_spec)
+        
+        logger.info(
+            f"Training: {train_spec.num_samples:,} samples, "
+            f"{steps_per_epoch:,} steps/epoch"
+        )
+        logger.info(
+            f"Validation: {val_spec.num_samples:,} samples, "
+            f"{val_steps:,} steps/epoch"
+        )
         
         return train_ds, val_ds, steps_per_epoch, val_steps
     

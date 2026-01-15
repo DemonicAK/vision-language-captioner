@@ -8,7 +8,7 @@ from __future__ import annotations
 
 from abc import ABC, abstractmethod
 from pathlib import Path
-from typing import Dict, List, Optional, Tuple
+from typing import Dict, List, Literal, Optional, Tuple
 
 import numpy as np
 
@@ -112,25 +112,41 @@ class BaseFeatureExtractor(ABC):
         self,
         features: Dict[str, np.ndarray],
         output_path: str | Path,
+        use_float16: bool = True,
     ) -> None:
         """Save extracted features to file.
         
         Args:
             features: Dictionary of features to save.
             output_path: Path to output file.
+            use_float16: Whether to save as float16 for 50% memory reduction.
+                        EfficientNet features don't need float32 precision.
         """
         output_path = Path(output_path)
         output_path.parent.mkdir(parents=True, exist_ok=True)
+        
+        if use_float16:
+            features = {k: v.astype(np.float16) for k, v in features.items()}
+            
         np.save(output_path, features)
     
     @staticmethod
-    def load_features(input_path: str | Path) -> Dict[str, np.ndarray]:
+    def load_features(
+        input_path: str | Path,
+        mmap_mode: Optional[Literal["r", "r+", "w+", "c"]] = None,
+    ) -> Dict[str, np.ndarray]:
         """Load features from file.
         
         Args:
             input_path: Path to features file.
+            mmap_mode: Memory-mapping mode. Use "r" for read-only mmap
+                      to avoid loading entire file into RAM. Options:
+                      - None: Load all into RAM (default, original behavior)
+                      - "r": Read-only memory-mapped (recommended for large files)
+                      - "r+": Read-write memory-mapped
+                      - "c": Copy-on-write memory-mapped
             
         Returns:
             Dictionary of loaded features.
         """
-        return np.load(input_path, allow_pickle=True).item()
+        return np.load(input_path, allow_pickle=True, mmap_mode=mmap_mode).item()
